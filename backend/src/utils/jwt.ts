@@ -1,14 +1,18 @@
 import jwt from 'jsonwebtoken';
 
-export const generateToken = (payload: {
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-change-this';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+
+export interface JwtPayload {
   userId: string;
   workspaceId: string;
-}): string => {
-  return jwt.sign(payload, process.env.JWT_SECRET!, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
-  });
-};
+  role: string;
+}
 
-export const verifyToken = (token: string) => {
-  return jwt.verify(token, process.env.JWT_SECRET!);
-};
+export function signToken(payload: JwtPayload): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN } as any);
+}
+
+export function verifyToken(token: string): JwtPayload {
+  return jwt.verify(token, JWT_SECRET) as JwtPayload;
+}

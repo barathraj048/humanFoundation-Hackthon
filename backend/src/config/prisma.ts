@@ -1,12 +1,15 @@
 import { PrismaClient } from '@prisma/client';
 
-export const prisma = new PrismaClient({
-  log: process.env.NODE_ENV === 'development' 
-    ? ['query', 'error', 'warn'] 
-    : ['error']
+declare global {
+  var __prisma: PrismaClient | undefined;
+}
+
+const prisma = global.__prisma || new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
 });
 
-// Graceful shutdown
-process.on('beforeExit', async () => {
-  await prisma.$disconnect();
-});
+if (process.env.NODE_ENV !== 'production') {
+  global.__prisma = prisma;
+}
+
+export default prisma;

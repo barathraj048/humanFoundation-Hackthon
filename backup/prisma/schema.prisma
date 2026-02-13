@@ -1,0 +1,324 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core Models
+
+model Workspace {
+  id            String    @id @default(uuid())
+  slug          String    @unique
+  businessName  String    @map("business_name")
+  address       String?
+  timezone      String    @default("UTC")
+  contactEmail  String?   @map("contact_email")
+  isActive      Boolean   @default(false) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  users         User[]
+  contacts      Contact[]
+  bookings      Booking[]
+  conversations Conversation[]
+  serviceTypes  ServiceType[]
+  availability  AvailabilityRule[]
+  formTemplates FormTemplate[]
+  inventory     InventoryItem[]
+  integrations  Integration[]
+  automationRules AutomationRule[]
+
+  @@map("workspaces")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  workspaceId  String   @map("workspace_id")
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  fullName     String?  @map("full_name")
+  role         Role     @default(STAFF)
+  permissions  Json     @default("{}")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages     Message[]
+
+  @@map("users")
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+model Integration {
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  type        IntegrationType
+  provider    String
+  config      Json     // API keys, tokens, etc.
+  isActive    Boolean  @default(true) @map("is_active")
+  lastSync    DateTime? @map("last_sync")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("integrations")
+}
+
+enum IntegrationType {
+  EMAIL
+  SMS
+  CALENDAR
+}
+
+model Contact {
+  id            String   @id @default(uuid())
+  workspaceId   String   @map("workspace_id")
+  name          String
+  email         String?
+  phone         String?
+  source        String   // 'contact_form', 'booking', 'manual'
+  status        ContactStatus @default(NEW)
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  bookings      Booking[]
+  conversations Conversation[]
+  formSubmissions FormSubmission[]
+
+  @@map("contacts")
+}
+
+enum ContactStatus {
+  NEW
+  CONTACTED
+  BOOKED
+  COMPLETED
+}
+
+model Conversation {
+  id                String      @id @default(uuid())
+  workspaceId       String      @map("workspace_id")
+  contactId         String      @map("contact_id")
+  channel           Channel
+  status            ConversationStatus @default(ACTIVE)
+  automationPaused  Boolean     @default(false) @map("automation_paused")
+  tags              String[]    @default([])
+  lastMessageAt     DateTime?   @map("last_message_at")
+  createdAt         DateTime    @default(now()) @map("created_at")
+
+  workspace         Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact           Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages          Message[]
+
+  @@unique([contactId, channel])
+  @@map("conversations")
+}
+
+enum Channel {
+  EMAIL
+  SMS
+  SYSTEM
+}
+
+enum ConversationStatus {
+  ACTIVE
+  PAUSED
+  CLOSED
+}
+
+model Message {
+  id              String   @id @default(uuid())
+  conversationId  String   @map("conversation_id")
+  direction       Direction
+  senderType      SenderType @map("sender_type")
+  senderId        String?  @map("sender_id")
+  content         String
+  metadata        Json     @default("{}")
+  isAutomated     Boolean  @default(false) @map("is_automated")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender          User?    @relation(fields: [senderId], references: [id])
+
+  @@map("messages")
+}
+
+enum Direction {
+  INBOUND
+  OUTBOUND
+}
+
+enum SenderType {
+  CONTACT
+  STAFF
+  SYSTEM
+}
+
+model ServiceType {
+  id              String   @id @default(uuid())
+  workspaceId     String   @map("workspace_id")
+  name            String
+  description     String?
+  durationMinutes Int      @map("duration_minutes")
+  location        String?
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  bookings        Booking[]
+
+  @@map("service_types")
+}
+
+model AvailabilityRule {
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  dayOfWeek   Int      @map("day_of_week") // 0=Monday, 6=Sunday
+  startTime   String   @map("start_time") // "09:00"
+  endTime     String   @map("end_time")   // "17:00"
+  isActive    Boolean  @default(true) @map("is_active")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("availability_rules")
+}
+
+model Booking {
+  id              String        @id @default(uuid())
+  workspaceId     String        @map("workspace_id")
+  contactId       String        @map("contact_id")
+  serviceTypeId   String        @map("service_type_id")
+  scheduledAt     DateTime      @map("scheduled_at")
+  durationMinutes Int           @map("duration_minutes")
+  status          BookingStatus @default(PENDING)
+  location        String?
+  notes           String?
+  calendarEventId String?       @map("calendar_event_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact         Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  serviceType     ServiceType   @relation(fields: [serviceTypeId], references: [id])
+  formSubmissions FormSubmission[]
+
+  @@map("bookings")
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+}
+
+model FormTemplate {
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  name        String
+  type        FormType
+  fields      Json     // [{name, type, required, options}]
+  triggerEvent String? @map("trigger_event")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  submissions FormSubmission[]
+
+  @@map("form_templates")
+}
+
+enum FormType {
+  CONTACT
+  INTAKE
+  AGREEMENT
+}
+
+model FormSubmission {
+  id              String   @id @default(uuid())
+  formTemplateId  String   @map("form_template_id")
+  contactId       String   @map("contact_id")
+  bookingId       String?  @map("booking_id")
+  data            Json     // Form responses
+  status          SubmissionStatus @default(PENDING)
+  completedAt     DateTime? @map("completed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  formTemplate    FormTemplate @relation(fields: [formTemplateId], references: [id], onDelete: Cascade)
+  contact         Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  booking         Booking? @relation(fields: [bookingId], references: [id])
+
+  @@map("form_submissions")
+}
+
+enum SubmissionStatus {
+  PENDING
+  COMPLETED
+}
+
+model InventoryItem {
+  id             String   @id @default(uuid())
+  workspaceId    String   @map("workspace_id")
+  name           String
+  quantity       Int      @default(0)
+  threshold      Int
+  unit           String?
+  vendorEmail    String?  @map("vendor_email")
+  lastAlertSent  DateTime? @map("last_alert_sent")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("inventory_items")
+}
+
+model AutomationRule {
+  id            String   @id @default(uuid())
+  workspaceId   String   @map("workspace_id")
+  name          String
+  triggerEvent  String   @map("trigger_event")
+  conditions    Json     @default("{}")
+  actionType    String   @map("action_type")
+  actionConfig  Json     @map("action_config")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  logs          AutomationLog[]
+
+  @@map("automation_rules")
+}
+
+model AutomationLog {
+  id                String   @id @default(uuid())
+  automationRuleId  String   @map("automation_rule_id")
+  contactId         String   @map("contact_id")
+  triggerEvent      String   @map("trigger_event")
+  actionTaken       String   @map("action_taken")
+  status            LogStatus
+  errorMessage      String?  @map("error_message")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  automationRule    AutomationRule @relation(fields: [automationRuleId], references: [id], onDelete: Cascade)
+
+  @@map("automation_logs")
+}
+
+enum LogStatus {
+  SUCCESS
+  FAILED
+  SKIPPED
+}

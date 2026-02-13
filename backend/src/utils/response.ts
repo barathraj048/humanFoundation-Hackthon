@@ -1,26 +1,37 @@
-export interface ApiResponse<T = any> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  meta?: {
-    page?: number;
-    total?: number;
-    [key: string]: any;
-  };
+// src/utils/response.ts
+import { Response } from 'express';
+
+export function successResponse<T>(
+  res: Response,
+  data: T,
+  statusCode = 200,
+  meta?: object
+) {
+  return res.status(statusCode).json({
+    success: true,
+    data,
+    ...(meta && { meta }),
+  });
 }
 
-export const successResponse = <T>(
-  data: T, 
-  meta?: ApiResponse['meta']
-): ApiResponse<T> => ({
-  success: true,
-  data,
-  meta
-});
+export function errorResponse(
+  res: Response,
+  message: string,
+  statusCode = 400
+) {
+  return res.status(statusCode).json({
+    success: false,
+    error: message,
+  });
+}
 
-export const errorResponse = (
-  error: string
-): ApiResponse => ({
-  success: false,
-  error
-});
+export class AppError extends Error {
+  public statusCode: number;
+
+  constructor(message: string, statusCode = 400) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = 'AppError';
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
