@@ -1,27 +1,24 @@
 import { Request, Response, NextFunction } from 'express';
-import { verifyToken, JwtPayload } from '../utils/jwt';
+import { verifyToken } from '../utils/jwt';
 import { errorResponse } from '../utils/response';
 import prisma from '../config/prisma';
 
-// Extend Express Request type
+// Augment Express Request type
 declare global {
   namespace Express {
     interface Request {
-      user?: JwtPayload & {
+      user?: {
         id: string;
         email: string;
         role: string;
         workspaceId: string;
+        userId: string;
       };
     }
   }
 }
 
-export async function authenticate(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
+export async function authenticate(req: Request, res: Response, next: NextFunction) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -31,7 +28,6 @@ export async function authenticate(
     const token = authHeader.substring(7);
     const payload = verifyToken(token);
 
-    // Verify user still exists and is active
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
       select: { id: true, email: true, role: true, workspaceId: true, isActive: true },
@@ -42,8 +38,8 @@ export async function authenticate(
     }
 
     req.user = {
-      ...payload,
       id: user.id,
+      userId: user.id,
       email: user.email,
       role: user.role,
       workspaceId: user.workspaceId,
@@ -60,13 +56,4 @@ export function requireOwner(req: Request, res: Response, next: NextFunction) {
     return errorResponse(res, 'Owner access required', 403);
   }
   next();
-}
-
-export function requireWorkspace(workspaceId: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (req.user?.workspaceId !== workspaceId) {
-      return errorResponse(res, 'Access denied', 403);
-    }
-    next();
-  };
 }

@@ -1,5 +1,6 @@
 import prisma from '../config/prisma';
 import { sendWelcomeEmail, sendBookingConfirmationEmail, sendBookingReminderEmail } from './email.service';
+import { randomUUID } from 'crypto';
 
 export type TriggerEvent =
   | 'contact_created'
@@ -15,27 +16,17 @@ export interface AutomationContext {
   formSubmissionId?: string;
 }
 
-export async function triggerAutomation(
-  workspaceId: string,
-  event: TriggerEvent,
-  context: AutomationContext
-) {
-  // Get active automation rules for this event
+export async function triggerAutomation(workspaceId: string, event: TriggerEvent, context: AutomationContext) {
   const rules = await prisma.automationRule.findMany({
     where: { workspaceId, triggerEvent: event, isActive: true },
   });
-
   if (rules.length === 0) return;
 
-  // Get conversation to check if automation is paused
   if (context.contactId) {
     const conversation = await prisma.conversation.findFirst({
       where: { workspaceId, contactId: context.contactId, status: 'ACTIVE' },
     });
-    if (conversation?.automationPaused) {
-      console.log(`⏸️ Automation paused for contact ${context.contactId}`);
-      return;
-    }
+    if (conversation?.automationPaused) return;
   }
 
   for (const rule of rules) {
@@ -43,50 +34,34 @@ export async function triggerAutomation(
   }
 }
 
-async function executeRule(
-  workspaceId: string,
-  rule: any,
-  event: TriggerEvent,
-  context: AutomationContext
-) {
+async function executeRule(workspaceId: string, rule: any, event: TriggerEvent, context: AutomationContext) {
   let status = 'SUCCESS';
   let error: string | undefined;
 
   try {
     const actionConfig = rule.actionConfig as Record<string, any>;
-
-    if (rule.actionType === 'send_email') {
-      await handleSendEmailAction(workspaceId, event, context, actionConfig);
-    } else if (rule.actionType === 'add_tag') {
-      await handleAddTagAction(workspaceId, context, actionConfig);
-    } else if (rule.actionType === 'create_conversation') {
-      await handleCreateConversationAction(workspaceId, context);
-    }
+    if (rule.actionType === 'send_email') await handleSendEmailAction(workspaceId, event, context, actionConfig);
+    else if (rule.actionType === 'add_tag') await handleAddTagAction(workspaceId, context, actionConfig);
+    else if (rule.actionType === 'create_conversation') await handleCreateConversationAction(workspaceId, context);
   } catch (err: any) {
     status = 'FAILED';
     error = err.message;
-    console.error(`Automation rule ${rule.id} failed:`, err);
   }
 
-  // Log the automation
+  // Create log via relations to avoid workspaceId direct issue
   await prisma.automationLog.create({
     data: {
-      workspaceId,
-      automationRuleId: rule.id,
+      workspace: { connect: { id: workspaceId } },
+      automationRule: { connect: { id: rule.id } },
       triggerEvent: event,
-      entityId: context.contactId || context.bookingId,
+      entityId: context.contactId || context.bookingId || null,
       status: status as any,
-      error,
+      error: error || null,
     },
   });
 }
 
-async function handleSendEmailAction(
-  workspaceId: string,
-  event: TriggerEvent,
-  context: AutomationContext,
-  config: Record<string, any>
-) {
+async function handleSendEmailAction(workspaceId: string, event: TriggerEvent, context: AutomationContext, config: Record<string, any>) {
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: { businessName: true, address: true, slug: true },
@@ -94,10 +69,7 @@ async function handleSendEmailAction(
   if (!workspace) return;
 
   if (event === 'contact_created' && context.contactId) {
-    const contact = await prisma.contact.findUnique({
-      where: { id: context.contactId },
-      select: { name: true, email: true },
-    });
+    const contact = await prisma.contact.findUnique({ where: { id: context.contactId }, select: { name: true, email: true } });
     if (!contact?.email) return;
 
     await sendWelcomeEmail(workspaceId, contact.email, {
@@ -106,10 +78,7 @@ async function handleSendEmailAction(
       bookingLink: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/book/${workspace.slug}`,
     });
 
-    // Create system message in conversation
-    const conversation = await prisma.conversation.findFirst({
-      where: { workspaceId, contactId: context.contactId },
-    });
+    const conversation = await prisma.conversation.findFirst({ where: { workspaceId, contactId: context.contactId } });
     if (conversation) {
       await prisma.message.create({
         data: {
@@ -146,10 +115,7 @@ async function handleSendEmailAction(
   if (event === 'booking_24h_before' && context.bookingId) {
     const booking = await prisma.booking.findUnique({
       where: { id: context.bookingId },
-      include: {
-        contact: { select: { name: true, email: true } },
-        serviceType: { select: { name: true } },
-      },
+      include: { contact: { select: { name: true, email: true } }, serviceType: { select: { name: true } } },
     });
     if (!booking?.contact.email) return;
 
@@ -163,102 +129,36 @@ async function handleSendEmailAction(
   }
 }
 
-async function handleAddTagAction(
-  workspaceId: string,
-  context: AutomationContext,
-  config: Record<string, any>
-) {
+async function handleAddTagAction(workspaceId: string, context: AutomationContext, config: Record<string, any>) {
   if (!context.contactId) return;
   const tag = config.tag as string;
   if (!tag) return;
-
-  const conversation = await prisma.conversation.findFirst({
-    where: { workspaceId, contactId: context.contactId },
-  });
-
+  const conversation = await prisma.conversation.findFirst({ where: { workspaceId, contactId: context.contactId } });
   if (conversation && !conversation.tags.includes(tag)) {
-    await prisma.conversation.update({
-      where: { id: conversation.id },
-      data: { tags: { push: tag } },
-    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { tags: { push: tag } } });
   }
 }
 
-async function handleCreateConversationAction(
-  workspaceId: string,
-  context: AutomationContext
-) {
+async function handleCreateConversationAction(workspaceId: string, context: AutomationContext) {
   if (!context.contactId) return;
-
-  const existing = await prisma.conversation.findFirst({
-    where: { workspaceId, contactId: context.contactId },
-  });
-
+  const existing = await prisma.conversation.findFirst({ where: { workspaceId, contactId: context.contactId } });
   if (!existing) {
     await prisma.conversation.create({
-      data: {
-        workspaceId,
-        contactId: context.contactId,
-        channel: 'EMAIL',
-        tags: ['New Lead'],
-      },
+      data: { workspaceId, contactId: context.contactId, channel: 'EMAIL', tags: ['New Lead'] },
     });
   }
 }
-
-// ─── SEED DEFAULT AUTOMATION RULES ──────────────────────────────────────────
 
 export async function seedDefaultAutomations(workspaceId: string) {
   const defaults = [
-    {
-      name: 'Welcome Email',
-      triggerEvent: 'contact_created',
-      actionType: 'send_email',
-      actionConfig: { template: 'welcome' },
-    },
-    {
-      name: 'Create Contact Conversation',
-      triggerEvent: 'contact_created',
-      actionType: 'create_conversation',
-      actionConfig: {},
-    },
-    {
-      name: 'New Lead Tag',
-      triggerEvent: 'contact_created',
-      actionType: 'add_tag',
-      actionConfig: { tag: 'New Lead' },
-    },
-    {
-      name: 'Booking Confirmation Email',
-      triggerEvent: 'booking_created',
-      actionType: 'send_email',
-      actionConfig: { template: 'booking_confirmation' },
-    },
-    {
-      name: 'Booking Confirmed Tag',
-      triggerEvent: 'booking_created',
-      actionType: 'add_tag',
-      actionConfig: { tag: 'Booking Confirmed' },
-    },
-    {
-      name: 'Booking Reminder',
-      triggerEvent: 'booking_24h_before',
-      actionType: 'send_email',
-      actionConfig: { template: 'booking_reminder' },
-    },
+    { name: 'Welcome Email', triggerEvent: 'contact_created', actionType: 'send_email', actionConfig: { template: 'welcome' } },
+    { name: 'Create Contact Conversation', triggerEvent: 'contact_created', actionType: 'create_conversation', actionConfig: {} },
+    { name: 'New Lead Tag', triggerEvent: 'contact_created', actionType: 'add_tag', actionConfig: { tag: 'New Lead' } },
+    { name: 'Booking Confirmation Email', triggerEvent: 'booking_created', actionType: 'send_email', actionConfig: { template: 'booking_confirmation' } },
+    { name: 'Booking Confirmed Tag', triggerEvent: 'booking_created', actionType: 'add_tag', actionConfig: { tag: 'Booking Confirmed' } },
+    { name: 'Booking Reminder', triggerEvent: 'booking_24h_before', actionType: 'send_email', actionConfig: { template: 'booking_reminder' } },
   ];
-
   for (const rule of defaults) {
-    await prisma.automationRule.upsert({
-      where: {
-        id: `${workspaceId}-${rule.name}`.slice(0, 36),
-      },
-      update: {},
-      create: {
-        ...rule,
-        workspaceId,
-        id: require('crypto').randomUUID(),
-      },
-    });
+    await prisma.automationRule.create({ data: { ...rule, workspaceId, isActive: true } });
   }
 }
