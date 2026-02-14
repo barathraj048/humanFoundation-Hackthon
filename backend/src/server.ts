@@ -28,7 +28,7 @@ const HOST = '0.0.0.0'; // CRITICAL for Render — must bind to all interfaces
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   'http://localhost:3000',
-  'http://localhost:3001',
+  'https://human-foundation-hackthon.vercel.app'
 ].filter(Boolean) as string[];
 
 app.use(cors({
