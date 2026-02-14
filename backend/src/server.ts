@@ -19,29 +19,48 @@ import { errorHandler } from './middleware/error.middleware';
 import { startCronJobs } from './services/cron.service';
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+
+// ── Render requires 0.0.0.0 binding ──────────────────────────────────────────
+const PORT = parseInt(process.env.PORT || '8000', 10);
+const HOST = '0.0.0.0'; // CRITICAL for Render — must bind to all interfaces
+
+// ── CORS ─────────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  'http://localhost:3000',
+  'http://localhost:3001',
+].filter(Boolean) as string[];
 
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:3000',
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.some(o => origin.startsWith(o))) return callback(null, true);
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));
+
 app.use(json({ limit: '10mb' }));
 
-if (process.env.NODE_ENV === 'development') {
+// ── Request logging in dev ────────────────────────────────────────────────────
+if (process.env.NODE_ENV !== 'production') {
   app.use((req, _res, next) => {
     console.log(`${req.method} ${req.path}`);
     next();
   });
 }
 
+// ── Health check (Render pings this) ─────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV,
+  });
 });
 
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/workspaces', workspaceRoutes);
 app.use('/api/bookings', bookingRoutes);
@@ -54,14 +73,19 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api/automations', automationRoutes);
 app.use('/api/public', publicRoutes);
 
+// ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {
   res.status(404).json({ success: false, error: 'Route not found' });
 });
 
+// ── Error handler ─────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`✅  CareOps API → http://localhost:${PORT}`);
+// ── Start ─────────────────────────────────────────────────────────────────────
+// IMPORTANT: Must listen on HOST 0.0.0.0 for Render to detect the open port
+app.listen(PORT, HOST, () => {
+  console.log(`✅  CareOps API running on http://${HOST}:${PORT}`);
+  console.log(`🌍  Environment: ${process.env.NODE_ENV || 'development'}`);
   startCronJobs();
 });
 
