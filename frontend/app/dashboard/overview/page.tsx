@@ -1,200 +1,286 @@
-import { Request, Response, NextFunction } from 'express';
-import prisma from '../config/prisma';
-import { successResponse } from '../utils/response';
-import { subDays, startOfDay, endOfDay } from 'date-fns';
+'use client';
+import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
+import { format } from 'date-fns';
+import { AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import api from '@/lib/api';
+import { DashboardStats } from '@/types';
+import { cn, formatTime, getStatusColor } from '@/lib/utils';
+import {
+  Calendar, Users, FileText, TrendingUp, AlertCircle, AlertTriangle,
+  Info, ArrowUpRight, Clock, MapPin, ChevronRight, RefreshCw
+} from 'lucide-react';
 
-export async function getOverview(req: Request, res: Response, next: NextFunction) {
-  try {
-    const workspaceId = req.user!.workspaceId;
-    const today = new Date();
-    const todayStart = startOfDay(today);
-    const todayEnd = endOfDay(today);
+const Sk = ({ className }: { className?: string }) => (
+  <div className={cn('skeleton rounded-xl', className)} />
+);
 
-    const [
-      todayBookings,
-      completedToday,
-      noShowToday,
-      upcomingBookings,
-      newLeadsToday,
-      totalActiveLeads,
-      unansweredLeads,
-    ] = await Promise.all([
-      prisma.booking.count({ where: { workspaceId, scheduledAt: { gte: todayStart, lte: todayEnd } } }),
-      prisma.booking.count({ where: { workspaceId, status: 'COMPLETED', scheduledAt: { gte: todayStart, lte: todayEnd } } }),
-      prisma.booking.count({ where: { workspaceId, status: 'NO_SHOW', scheduledAt: { gte: todayStart, lte: todayEnd } } }),
-      prisma.booking.findMany({
-        where: { workspaceId, status: { in: ['PENDING', 'CONFIRMED'] }, scheduledAt: { gte: today } },
-        include: {
-          contact: { select: { id: true, name: true, email: true } },
-          serviceType: { select: { id: true, name: true, durationMinutes: true } },
-        },
-        orderBy: { scheduledAt: 'asc' },
-        take: 5,
-      }),
-      prisma.contact.count({ where: { workspaceId, status: 'NEW', createdAt: { gte: todayStart } } }),
-      prisma.contact.count({ where: { workspaceId, status: { in: ['NEW', 'CONTACTED'] } } }),
-      prisma.contact.count({ where: { workspaceId, status: 'NEW', createdAt: { lte: subDays(today, 1) } } }),
-    ]);
-
-    const [pendingForms, overdueForms, completedForms] = await Promise.all([
-      prisma.formSubmission.count({ where: { workspace: { id: workspaceId }, status: 'PENDING' } }),
-      prisma.formSubmission.count({ where: { workspace: { id: workspaceId }, status: 'PENDING', createdAt: { lte: subDays(today, 3) } } }),
-      prisma.formSubmission.count({ where: { workspace: { id: workspaceId }, status: 'COMPLETED', completedAt: { gte: todayStart } } }),
-    ]);
-
-    const allItems = await prisma.inventoryItem.findMany({
-      where: { workspaceId },
-      select: { quantity: true, threshold: true },
-    });
-    const criticalStockItems = allItems.filter(i => i.quantity === 0).length;
-    const lowStockItems = allItems.filter(i => i.quantity > 0 && i.quantity <= i.threshold).length;
-
-    const alerts: any[] = [];
-    if (criticalStockItems > 0) alerts.push({ type: 'inventory_critical', message: `${criticalStockItems} item${criticalStockItems > 1 ? 's' : ''} out of stock`, link: '/dashboard/inventory', severity: 'critical' });
-    if (lowStockItems > 0) alerts.push({ type: 'inventory_low', message: `${lowStockItems} item${lowStockItems > 1 ? 's' : ''} running low`, link: '/dashboard/inventory', severity: 'warning' });
-    if (overdueForms > 0) alerts.push({ type: 'forms_overdue', message: `${overdueForms} form${overdueForms > 1 ? 's' : ''} overdue (3+ days)`, link: '/dashboard/forms', severity: 'warning' });
-    if (unansweredLeads > 0) alerts.push({ type: 'leads_unanswered', message: `${unansweredLeads} lead${unansweredLeads > 1 ? 's' : ''} unanswered 24h+`, link: '/dashboard/contacts', severity: 'warning' });
-    if (noShowToday > 0) alerts.push({ type: 'no_show', message: `${noShowToday} no-show${noShowToday > 1 ? 's' : ''} today`, link: '/dashboard/bookings', severity: 'info' });
-
-    return successResponse(res, {
-      todayBookings: { total: todayBookings, completed: completedToday, upcoming: upcomingBookings.length, noShow: noShowToday },
-      leads: { newToday: newLeadsToday, unanswered: unansweredLeads, totalActive: totalActiveLeads },
-      forms: { pending: pendingForms, overdue: overdueForms, completedToday: completedForms },
-      inventory: { lowStock: lowStockItems, criticalStock: criticalStockItems },
-      alerts,
-      upcomingBookings,
-    });
-  } catch (err) { next(err); }
+interface TrendData {
+  trend: { date: string; label: string; total: number }[];
+  totalToday: number;
 }
 
-export async function getAnalytics(req: Request, res: Response, next: NextFunction) {
-  try {
-    const workspaceId = req.user!.workspaceId;
-    const { range = '7' } = req.query;
-    const days = parseInt(range as string) || 7;
-    const since = subDays(new Date(), days);
+export default function OverviewPage() {
+  const [stats, setStats]     = useState<DashboardStats | null>(null);
+  const [trend, setTrend]     = useState<TrendData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [trendLoading, setTrendLoading] = useState(true);
+  const [lastUpdated, setLastUpdated]   = useState<Date | null>(null);
 
-    const [bookings, contacts, bookingsByStatus] = await Promise.all([
-      prisma.booking.findMany({
-        where: { workspaceId, createdAt: { gte: since } },
-        select: { id: true, scheduledAt: true, status: true, createdAt: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-      prisma.contact.findMany({
-        where: { workspaceId, createdAt: { gte: since } },
-        select: { id: true, createdAt: true },
-      }),
-      prisma.booking.groupBy({
-        by: ['status'],
-        where: { workspaceId },
-        _count: { id: true },
-      }),
-    ]);
+  const fetchStats = useCallback(async () => {
+    try {
+      const r = await api.get('api/dashboard/overview');
+      setStats(r.data.data);
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
+  }, []);
 
-    const trendMap = new Map<string, { bookings: number; leads: number }>();
-    for (let i = days - 1; i >= 0; i--) {
-      const d = subDays(new Date(), i);
-      trendMap.set(d.toISOString().split('T')[0], { bookings: 0, leads: 0 });
-    }
-    bookings.forEach(b => { const k = b.createdAt.toISOString().split('T')[0]; const e = trendMap.get(k); if (e) e.bookings++; });
-    contacts.forEach(c => { const k = c.createdAt.toISOString().split('T')[0]; const e = trendMap.get(k); if (e) e.leads++; });
+  const fetchTrend = useCallback(async (silent = false) => {
+    if (!silent) setTrendLoading(true);
+    try {
+      const r = await api.get('api/dashboard/booking-trend');
+      setTrend(r.data.data);
+      setLastUpdated(new Date());
+    } catch (e) { console.error(e); }
+    finally { setTrendLoading(false); }
+  }, []);
 
-    const bookingTrend = Array.from(trendMap.entries()).map(([date, v]) => ({ date, ...v }));
+  useEffect(() => { fetchStats(); fetchTrend(); }, [fetchStats, fetchTrend]);
 
-    const hourMap = new Map<number, number>();
-    for (let h = 8; h <= 18; h++) hourMap.set(h, 0);
-    bookings.forEach(b => { const h = b.scheduledAt.getHours(); hourMap.set(h, (hourMap.get(h) || 0) + 1); });
-    const bookingsByHour = Array.from(hourMap.entries()).map(([hour, count]) => ({
-      hour: `${hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'pm' : 'am'}`, count,
-    }));
+  // Auto-refresh every 30 seconds — silent, no spinner
+  useEffect(() => {
+    const t = setInterval(() => { fetchStats(); fetchTrend(true); }, 30_000);
+    return () => clearInterval(t);
+  }, [fetchStats, fetchTrend]);
 
-    const statusBreakdown: Record<string, number> = {};
-    bookingsByStatus.forEach(s => { statusBreakdown[s.status] = s._count.id; });
+  // Transform API data for recharts — real data only, no mock
+  const chartData = (trend?.trend ?? []).map(d => ({
+    day: new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' }),
+    v: d.total,
+    full: d.label,
+  }));
+  const hasData = chartData.some(d => d.v > 0);
 
-    return successResponse(res, {
-      conversionRate: contacts.length > 0 ? Math.round((bookings.length / contacts.length) * 100) : 0,
-      noShowRate: bookings.length > 0 ? Math.round(((statusBreakdown['NO_SHOW'] || 0) / bookings.length) * 100) : 0,
-      bookingTrend,
-      bookingsByHour,
-      statusBreakdown,
-      totalBookings: bookings.length,
-      totalContacts: contacts.length,
-    });
-  } catch (err) { next(err); }
+  const colorMap: Record<string, { bg: string; icon: string }> = {
+    blue:    { bg: 'bg-blue-50',    icon: 'text-blue-600' },
+    violet:  { bg: 'bg-violet-50',  icon: 'text-violet-600' },
+    emerald: { bg: 'bg-emerald-50', icon: 'text-emerald-600' },
+    amber:   { bg: 'bg-amber-50',   icon: 'text-amber-600' },
+    red:     { bg: 'bg-red-50',     icon: 'text-red-600' },
+  };
+
+  const statCards = stats ? [
+    { label:"Today's Bookings", value:stats.todayBookings.total, sub:`${stats.todayBookings.completed} completed`, icon:Calendar, color:'blue', trend:`+${stats.todayBookings.upcoming} upcoming` },
+    { label:'New Leads Today',  value:stats.leads.newToday,      sub:`${stats.leads.unanswered} unanswered`,        icon:Users,    color:'violet', trend:`${stats.leads.totalActive} active` },
+    { label:'Pending Forms',    value:stats.forms.pending,       sub:`${stats.forms.overdue} overdue`,              icon:FileText, color:stats.forms.overdue>0?'red':'amber', trend:`${stats.forms.completedToday} done today` },
+    { label:'Inventory Alerts', value:stats.inventory?.lowStock??0, sub:`${stats.inventory?.criticalStock??0} critical`, icon:TrendingUp, color:(stats.inventory?.criticalStock??0)>0?'red':'emerald', trend:'View stock' },
+  ] : [];
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="page-title">Good {getGreeting()}, here's your day</h1>
+          <p className="page-subtitle">{format(new Date(), 'EEEE, MMMM d, yyyy')}</p>
+        </div>
+        <button onClick={() => { fetchStats(); fetchTrend(); }} disabled={loading}
+          className="flex items-center gap-2 text-xs text-slate-500 border border-slate-200 px-3 py-2 rounded-xl hover:bg-slate-50 disabled:opacity-40 transition-all">
+          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+          Refresh
+        </button>
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {loading
+          ? Array(4).fill(0).map((_,i) => <Sk key={i} className="h-36"/>)
+          : statCards.map(card => {
+              const Icon = card.icon;
+              const c = colorMap[card.color] || colorMap.blue;
+              return (
+                <div key={card.label} className="stat-card group cursor-pointer">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center', c.bg)}>
+                      <Icon className={cn('w-5 h-5', c.icon)}/>
+                    </div>
+                    <ArrowUpRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors"/>
+                  </div>
+                  <div className="text-3xl font-bold font-display text-slate-900 mb-1">{card.value}</div>
+                  <div className="text-sm font-medium text-slate-700">{card.label}</div>
+                  <div className="text-xs text-slate-400 mt-1">{card.sub}</div>
+                  <div className={cn('mt-3 inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full', c.bg, c.icon)}>
+                    {card.trend}
+                  </div>
+                </div>
+              );
+            })}
+      </div>
+
+      {/* Middle row */}
+      <div className="grid xl:grid-cols-3 gap-4">
+
+        {/* ─── BOOKING TREND — LIVE from /dashboard/booking-trend ─────── */}
+        <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+          <div className="flex items-center justify-between mb-5">
+            <div>
+              <h3 className="font-semibold text-slate-900 font-display">Booking Trend</h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {lastUpdated ? `Live · ${lastUpdated.toLocaleTimeString()}` : 'Last 7 days'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"/>
+                Live
+              </div>
+              {trend && (
+                <span className="text-xs font-semibold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-full">
+                  {trend.totalToday} today
+                </span>
+              )}
+            </div>
+          </div>
+
+          {trendLoading ? (
+            <div className="h-40 bg-slate-50 rounded-xl animate-pulse"/>
+          ) : !hasData ? (
+            <div className="h-40 flex flex-col items-center justify-center gap-2 text-slate-400">
+              <Calendar className="w-8 h-8 text-slate-200"/>
+              <p className="text-sm">No bookings in the last 7 days</p>
+              <p className="text-xs">Chart updates live when bookings are created</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={160}>
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.15}/>
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{fill:'#94a3b8',fontSize:11}}/>
+                <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{fill:'#94a3b8',fontSize:11}} width={20}/>
+                <Tooltip
+                  contentStyle={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,fontSize:12}}
+                  cursor={{stroke:'#3b82f6',strokeWidth:1,strokeDasharray:'4 4'}}
+                  formatter={(val:any) => [val,'Bookings']}
+                  labelFormatter={(_:any,payload:any) => payload?.[0]?.payload?.full || ''}
+                />
+                <Area type="monotone" dataKey="v" stroke="#3b82f6" strokeWidth={2.5} fill="url(#grad)"
+                  dot={{fill:'#3b82f6',r:4,strokeWidth:0}} activeDot={{r:6,fill:'#2563eb'}} name="Bookings"/>
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* At a Glance */}
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 flex flex-col gap-4">
+          <h3 className="font-semibold text-slate-900 font-display">At a Glance</h3>
+          {loading ? (
+            <div className="space-y-3">{Array(4).fill(0).map((_,i) => <Sk key={i} className="h-12"/>)}</div>
+          ) : (
+            <div className="space-y-3 flex-1">
+              {[
+                { label:'Completed today',      value:stats?.todayBookings.completed??0, color:'text-emerald-600' },
+                { label:'No-shows today',        value:stats?.todayBookings.noShow??0,   color:'text-red-500' },
+                { label:'Total active contacts', value:stats?.leads.totalActive??0,       color:'text-blue-600' },
+                { label:'Forms completed today', value:stats?.forms.completedToday??0,    color:'text-violet-600' },
+              ].map(item => (
+                <div key={item.label} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                  <span className="text-sm text-slate-600">{item.label}</span>
+                  <span className={cn('text-lg font-bold font-display', item.color)}>{item.value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Alerts + Upcoming */}
+      <div className="grid xl:grid-cols-5 gap-4">
+        {/* Alerts */}
+        <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+          <h3 className="font-semibold text-slate-900 font-display mb-4">Action Required</h3>
+          {loading ? (
+            <div className="space-y-2">{Array(3).fill(0).map((_,i) => <Sk key={i} className="h-14"/>)}</div>
+          ) : stats?.alerts.length ? (
+            <div className="space-y-2">
+              {stats.alerts.map((alert,i) => {
+                const Icon = alert.severity==='critical'?AlertCircle:alert.severity==='warning'?AlertTriangle:Info;
+                const s: Record<string,string> = {
+                  critical:'bg-red-50 border-red-100 text-red-700',
+                  warning:'bg-amber-50 border-amber-100 text-amber-700',
+                  info:'bg-blue-50 border-blue-100 text-blue-700',
+                };
+                return (
+                  <Link key={i} href={alert.link}
+                    className={cn('flex items-start gap-3 p-3 rounded-xl border transition-all hover:shadow-sm',s[alert.severity])}>
+                    <Icon className="w-4 h-4 flex-shrink-0 mt-0.5"/>
+                    <p className="text-sm font-medium leading-tight flex-1">{alert.message}</p>
+                    <ChevronRight className="w-4 h-4 flex-shrink-0 mt-0.5 opacity-60"/>
+                  </Link>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-32 text-slate-400">
+              <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center mb-2">
+                <TrendingUp className="w-5 h-5 text-emerald-500"/>
+              </div>
+              <p className="text-sm">All clear! No alerts.</p>
+            </div>
+          )}
+        </div>
+
+        {/* Upcoming bookings */}
+        <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-slate-900 font-display">Upcoming Bookings</h3>
+            <Link href="/dashboard/bookings" className="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1">
+              View all <ChevronRight className="w-3 h-3"/>
+            </Link>
+          </div>
+          {loading ? (
+            <div className="space-y-3">{Array(4).fill(0).map((_,i) => <Sk key={i} className="h-16"/>)}</div>
+          ) : stats?.upcomingBookings.length ? (
+            <div className="space-y-2">
+              {stats.upcomingBookings.slice(0,5).map(b => (
+                <div key={b.id} className="flex items-center gap-4 p-3 rounded-xl hover:bg-slate-50 transition-colors group">
+                  <div className="w-12 h-12 bg-blue-600 rounded-xl flex flex-col items-center justify-center flex-shrink-0 shadow-sm shadow-blue-100">
+                    <div className="text-white text-lg font-bold font-display leading-none">{format(new Date(b.scheduledAt),'d')}</div>
+                    <div className="text-blue-200 text-xs uppercase">{format(new Date(b.scheduledAt),'MMM')}</div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-sm text-slate-800 truncate">{b.contact.name}</p>
+                      <span className={cn('text-xs px-2 py-0.5 rounded-full font-medium',getStatusColor(b.status))}>{b.status}</span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">{b.serviceType.name}</p>
+                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
+                      <span className="flex items-center gap-1"><Clock className="w-3 h-3"/>{formatTime(b.scheduledAt)}</span>
+                      {b.location&&<span className="flex items-center gap-1"><MapPin className="w-3 h-3"/>{b.location}</span>}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-32 text-slate-400">
+              <Calendar className="w-10 h-10 text-slate-200 mb-2"/>
+              <p className="text-sm">No upcoming bookings</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
-// Booking trend — uses BOTH scheduledAt and createdAt to catch all bookings
-export async function getBookingTrend(req: Request, res: Response, next: NextFunction) {
-  try {
-    const workspaceId = req.user!.workspaceId;
-    const now = new Date();
-
-    // Always use ISO string splitting for keys — consistent on any server timezone
-    const toKey = (d: Date) => d.toISOString().split('T')[0];
-
-    // Build 7-day window
-    const dayMap = new Map<string, number>();
-    for (let i = 6; i >= 0; i--) {
-      dayMap.set(toKey(subDays(now, i)), 0);
-    }
-
-    const sevenDaysAgo = subDays(startOfDay(now), 6);
-
-    // Fetch bookings — match on EITHER createdAt OR scheduledAt in last 7 days
-    const bookings = await prisma.booking.findMany({
-      where: {
-        workspaceId,
-        OR: [
-          { createdAt:   { gte: sevenDaysAgo } },
-          { scheduledAt: { gte: sevenDaysAgo } },
-        ],
-      },
-      select: { createdAt: true, scheduledAt: true, status: true },
-    });
-
-    bookings.forEach(b => {
-      // Prefer createdAt key (when booking was made) — more reliable for trend
-      // Fall back to scheduledAt if createdAt is outside window
-      const createdKey   = toKey(b.createdAt);
-      const scheduledKey = toKey(b.scheduledAt);
-      const key = dayMap.has(createdKey) ? createdKey : scheduledKey;
-      if (dayMap.has(key)) {
-        dayMap.set(key, (dayMap.get(key) || 0) + 1);
-      }
-    });
-
-    const trend = Array.from(dayMap.entries()).map(([date, total]) => ({
-      date,
-      // +T12:00:00 avoids midnight UTC rolling back a day in some locales
-      label: new Date(date + 'T12:00:00').toLocaleDateString('en-US', {
-        weekday: 'short', month: 'short', day: 'numeric',
-      }),
-      total,
-    }));
-
-    // Today hourly
-    const todayBookings = await prisma.booking.findMany({
-      where: {
-        workspaceId,
-        createdAt: { gte: startOfDay(now), lte: endOfDay(now) },
-      },
-      select: { createdAt: true },
-    });
-
-    const hourMap = new Map<number, number>();
-    for (let h = 6; h <= 22; h++) hourMap.set(h, 0);
-    todayBookings.forEach(b => {
-      const h = b.createdAt.getHours();
-      if (hourMap.has(h)) hourMap.set(h, (hourMap.get(h) || 0) + 1);
-    });
-
-    const todayHourly = Array.from(hourMap.entries()).map(([hour, count]) => ({
-      hour: `${hour > 12 ? hour - 12 : hour === 0 ? 12 : hour}${hour >= 12 ? 'pm' : 'am'}`,
-      count,
-    }));
-
-    const totalToday = dayMap.get(toKey(now)) ?? 0;
-
-    return successResponse(res, { trend, todayHourly, totalToday });
-  } catch (err) { next(err); }
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'morning';
+  if (h < 18) return 'afternoon';
+  return 'evening';
 }
