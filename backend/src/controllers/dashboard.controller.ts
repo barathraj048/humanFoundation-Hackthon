@@ -75,6 +75,72 @@ export async function getOverview(req: Request, res: Response, next: NextFunctio
   } catch (err) { next(err); }
 }
 
+// ─── NEW ENDPOINT: Booking Trend (Last 7 Days) ───────────────────────────────
+export async function getBookingTrend(req: Request, res: Response, next: NextFunction) {
+  try {
+    const workspaceId = req.user!.workspaceId;
+    const days = 7;
+    const since = subDays(new Date(), days);
+    const today = startOfDay(new Date());
+
+    // Fetch bookings created in the last 7 days
+    const bookings = await prisma.booking.findMany({
+      where: { 
+        workspaceId, 
+        createdAt: { gte: since } 
+      },
+      select: { 
+        id: true, 
+        createdAt: true 
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // Count today's bookings
+    const todayBookings = await prisma.booking.count({
+      where: {
+        workspaceId,
+        createdAt: { gte: today }
+      }
+    });
+
+    // Build trend map with all 7 days (including days with 0 bookings)
+    const trendMap = new Map<string, number>();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = subDays(new Date(), i);
+      const dateKey = d.toISOString().split('T')[0];
+      trendMap.set(dateKey, 0);
+    }
+
+    // Populate with actual booking counts
+    bookings.forEach(b => {
+      const dateKey = b.createdAt.toISOString().split('T')[0];
+      const current = trendMap.get(dateKey);
+      if (current !== undefined) {
+        trendMap.set(dateKey, current + 1);
+      }
+    });
+
+    // Format for frontend
+    const trend = Array.from(trendMap.entries()).map(([date, total]) => ({
+      date,
+      label: new Date(date + 'T12:00:00').toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        month: 'short', 
+        day: 'numeric' 
+      }),
+      total,
+    }));
+
+    return successResponse(res, {
+      trend,
+      totalToday: todayBookings,
+    });
+  } catch (err) { 
+    next(err); 
+  }
+}
+
 export async function getAnalytics(req: Request, res: Response, next: NextFunction) {
   try {
     const workspaceId = req.user!.workspaceId;
