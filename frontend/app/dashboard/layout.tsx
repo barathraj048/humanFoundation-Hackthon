@@ -18,7 +18,6 @@ const nav = [
   { name: 'Contacts', href: '/dashboard/contacts', icon: Users },
   { name: 'Forms', href: '/dashboard/forms', icon: FileText },
   { name: 'Inventory', href: '/dashboard/inventory', icon: Package },
-  { name: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 
