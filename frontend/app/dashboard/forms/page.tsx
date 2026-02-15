@@ -96,7 +96,7 @@ export default function FormsPage() {
     if (!name.trim()) { alert('Enter a form name'); return; }
     setSaving(true);
     try {
-      await api.post('/forms/templates', { name: name.trim(), type: formType, fields });
+      await api.post('api/forms/templates', { name: name.trim(), type: formType, fields });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
       await loadAll();
