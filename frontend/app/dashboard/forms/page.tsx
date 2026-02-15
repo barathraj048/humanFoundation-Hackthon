@@ -60,9 +60,9 @@ export default function FormsPage() {
     setLoading(true);
     try {
       const [t, s, c] = await Promise.all([
-        api.get('/forms/templates'),
-        api.get('/forms/submissions?limit=100'),
-        api.get('/contacts?limit=200'),
+        api.get('api/forms/templates'),
+        api.get('api/forms/submissions?limit=100'),
+        api.get('api/contacts?limit=200'),
       ]);
       setTemplates(t.data.data || []);
       setSubmissions(s.data.data || []);
@@ -112,7 +112,7 @@ export default function FormsPage() {
     if (!sendContactId) { alert('Select a contact first'); return; }
     setSending(true);
     try {
-      await api.post('/forms/submissions', {
+      await api.post('api/forms/submissions', {
         formTemplateId: sendModal!.id,
         contactId: sendContactId,
         data: {},
@@ -127,7 +127,7 @@ export default function FormsPage() {
   async function markComplete(id: string) {
     setCompleting(true);
     try {
-      await api.put(`/forms/submissions/${id}/complete`, { data: {} });
+      await api.put(`api/forms/submissions/${id}/complete`, { data: {} });
       await loadAll();
       setViewModal(null);
     } catch { alert('Failed to mark complete'); }
