@@ -1,540 +1,566 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { format } from 'date-fns';
 import api from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 import {
-  Plus, Trash2, Eye, Send, CheckCircle, Clock, AlertTriangle,
-  ChevronDown, ChevronUp, FileText, X, Save, GripVertical
+  FileText, Clock, CheckCircle2, AlertTriangle, ChevronRight,
+  Plus, X, Trash2, Send, Eye, GripVertical, ChevronDown
 } from 'lucide-react';
 
-type FieldType = 'text' | 'email' | 'phone' | 'textarea' | 'select' | 'checkbox' | 'date';
-interface FormField { id: string; label: string; type: FieldType; required: boolean; options?: string[] }
-interface FormTemplate { id: string; name: string; type: string; fields: FormField[]; isActive: boolean; createdAt: string }
-interface Submission {
-  id: string; status: string; createdAt: string;
-  contact: { name: string; email: string };
-  formTemplate: { name: string; type: string };
-  booking?: { serviceType: { name: string }; scheduledAt: string };
-}
-interface Contact { id: string; name: string; email: string; status: string }
+// ─── Types ────────────────────────────────────────────────────────────────────
+type FieldType = 'text' | 'textarea' | 'select' | 'multiselect' | 'checkbox' | 'date';
 
-const FIELD_TYPES: { value: FieldType; label: string }[] = [
-  { value: 'text', label: 'Short Text' },
-  { value: 'textarea', label: 'Long Text' },
-  { value: 'email', label: 'Email' },
-  { value: 'phone', label: 'Phone Number' },
-  { value: 'date', label: 'Date' },
-  { value: 'select', label: 'Dropdown' },
-  { value: 'checkbox', label: 'Checkbox' },
+interface FormField {
+  id: string; label: string; type: FieldType;
+  required: boolean; options: string[]; placeholder: string;
+}
+
+interface FormTemplate { id: string; name: string; type: string; fields: FormField[]; }
+interface Contact      { id: string; name: string; email: string; }
+interface Submission   {
+  id: string; status: 'PENDING' | 'COMPLETED'; createdAt: string; completedAt?: string;
+  data: Record<string, any>;
+  formTemplate: { id: string; name: string; type: string; fields: FormField[] };
+  contact: { id: string; name: string; email: string };
+  booking?: { scheduledAt: string; serviceType: { name: string } };
+}
+
+const FIELD_TYPES: { value: FieldType; label: string; desc: string }[] = [
+  { value: 'text',        label: 'Text',        desc: 'Single line answer' },
+  { value: 'textarea',    label: 'Long text',   desc: 'Paragraph answer' },
+  { value: 'select',      label: 'Dropdown',    desc: 'Pick one option' },
+  { value: 'multiselect', label: 'Multi-select',desc: 'Pick multiple options' },
+  { value: 'checkbox',    label: 'Checkbox',    desc: 'Yes / No toggle' },
+  { value: 'date',        label: 'Date',        desc: 'Date picker' },
 ];
 
-export default function FormsPage() {
-  const [tab, setTab] = useState<'submissions' | 'templates' | 'builder'>('submissions');
-  const [templates, setTemplates] = useState<FormTemplate[]>([]);
-  const [submissions, setSubmissions] = useState<Submission[]>([]);
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState('ALL');
+function uid() { return Math.random().toString(36).slice(2, 9); }
 
-  // Builder
-  const [name, setName] = useState('');
-  const [formType, setFormType] = useState('INTAKE');
+// ─── Form Builder Modal ───────────────────────────────────────────────────────
+function BuilderModal({ onClose, onSave }: { onClose: () => void; onSave: (t: FormTemplate) => void }) {
+  const [name, setName]     = useState('');
+  const [type, setType]     = useState<'INTAKE' | 'CONTACT' | 'AGREEMENT'>('INTAKE');
   const [fields, setFields] = useState<FormField[]>([
-    { id: '1', label: 'Full Name', type: 'text', required: true },
-    { id: '2', label: 'Date of Birth', type: 'date', required: false },
-    { id: '3', label: 'Reason for Visit', type: 'textarea', required: true },
+    { id: uid(), label: 'Full Name', type: 'text', required: true, options: [], placeholder: '' },
   ]);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
 
-  // Modals
-  const [sendModal, setSendModal] = useState<FormTemplate | null>(null);
-  const [sendContactId, setSendContactId] = useState('');
-  const [sending, setSending] = useState(false);
-  const [viewModal, setViewModal] = useState<Submission | null>(null);
-  const [completing, setCompleting] = useState(false);
-
-  useEffect(() => { loadAll(); }, []);
-
-  async function loadAll() {
-    setLoading(true);
-    try {
-      const [t, s, c] = await Promise.all([
-        api.get('api/forms/templates'),
-        api.get('api/forms/submissions?limit=100'),
-        api.get('api/contacts?limit=200'),
-      ]);
-      setTemplates(t.data.data || []);
-      setSubmissions(s.data.data || []);
-      setContacts(c.data.data || []);
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  }
-
-  // ─── BUILDER HELPERS ──────────────────────────────────────────────────────
   function addField() {
-    setFields(f => [...f, { id: String(Date.now()), label: 'New Field', type: 'text', required: false }]);
+    setFields(f => [...f, { id: uid(), label: 'New Field', type: 'text', required: false, options: [], placeholder: '' }]);
   }
-  function updateField(id: string, patch: Partial<FormField>) {
-    setFields(f => f.map(x => x.id === id ? { ...x, ...patch } : x));
+  function removeField(id: string) { setFields(f => f.filter(x => x.id !== id)); }
+  function updateField(id: string, key: keyof FormField, value: any) {
+    setFields(f => f.map(x => x.id === id ? { ...x, [key]: value } : x));
   }
-  function removeField(id: string) {
-    if (fields.length <= 1) return;
-    setFields(f => f.filter(x => x.id !== id));
+  function addOption(id: string) {
+    setFields(f => f.map(x => x.id === id ? { ...x, options: [...x.options, 'Option'] } : x));
   }
-  function moveField(id: string, dir: 'up' | 'down') {
-    const i = fields.findIndex(f => f.id === id);
-    if (dir === 'up' && i === 0) return;
-    if (dir === 'down' && i === fields.length - 1) return;
-    const arr = [...fields];
-    const swap = dir === 'up' ? i - 1 : i + 1;
-    [arr[i], arr[swap]] = [arr[swap], arr[i]];
-    setFields(arr);
+  function updateOption(fieldId: string, idx: number, val: string) {
+    setFields(f => f.map(x => x.id === fieldId
+      ? { ...x, options: x.options.map((o, i) => i === idx ? val : o) }
+      : x
+    ));
+  }
+  function removeOption(fieldId: string, idx: number) {
+    setFields(f => f.map(x => x.id === fieldId
+      ? { ...x, options: x.options.filter((_, i) => i !== idx) }
+      : x
+    ));
   }
 
-  async function saveForm() {
-    if (!name.trim()) { alert('Enter a form name'); return; }
+  async function save() {
+    if (!name.trim()) { toast.error('Form name is required'); return; }
+    if (fields.length === 0) { toast.error('Add at least one field'); return; }
     setSaving(true);
     try {
-      await api.post('api/forms/templates', { name: name.trim(), type: formType, fields });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-      await loadAll();
-      setTab('templates');
-      setName(''); setFormType('INTAKE');
-      setFields([{ id: '1', label: 'Full Name', type: 'text', required: true }]);
-    } catch { alert('Failed to save. Please try again.'); }
+      const r = await api.post('/forms/templates', { name: name.trim(), type, fields });
+      onSave(r.data.data);
+      toast.success('Form created!');
+      onClose();
+    } catch { toast.error('Failed to create form'); }
     finally { setSaving(false); }
   }
 
-  // ─── SEND FORM ────────────────────────────────────────────────────────────
-  async function sendForm() {
-    if (!sendContactId) { alert('Select a contact first'); return; }
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <h2 className="font-bold text-slate-900 text-lg">Create Form</h2>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100"><X className="w-4 h-4"/></button>
+        </div>
+
+        <div className="p-6 space-y-5 overflow-y-auto flex-1">
+          {/* Form name + type */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Form Name *</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. New Patient Intake"
+                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Form Type</label>
+              <select value={type} onChange={e => setType(e.target.value as any)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                <option value="INTAKE">Intake</option>
+                <option value="CONTACT">Contact</option>
+                <option value="AGREEMENT">Agreement</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Fields */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-3">Form Fields</label>
+            <div className="space-y-3">
+              {fields.map((field, idx) => (
+                <div key={field.id} className="border border-slate-200 rounded-xl p-4 space-y-3 bg-slate-50/50">
+                  <div className="flex items-start gap-3">
+                    <GripVertical className="w-4 h-4 text-slate-300 mt-2.5 flex-shrink-0"/>
+                    <div className="flex-1 grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-slate-500 mb-1 block">Label</label>
+                        <input value={field.label} onChange={e => updateField(field.id, 'label', e.target.value)}
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-500 mb-1 block">Field Type</label>
+                        <select value={field.type} onChange={e => updateField(field.id, 'type', e.target.value)}
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                          {FIELD_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 mt-6">
+                      <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                        <input type="checkbox" checked={field.required}
+                          onChange={e => updateField(field.id, 'required', e.target.checked)}
+                          className="w-3.5 h-3.5 rounded"/>
+                        Required
+                      </label>
+                      {fields.length > 1 && (
+                        <button onClick={() => removeField(field.id)} className="text-slate-400 hover:text-red-500 transition-colors">
+                          <Trash2 className="w-3.5 h-3.5"/>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Options for select/multiselect */}
+                  {(field.type === 'select' || field.type === 'multiselect') && (
+                    <div className="ml-7">
+                      <div className="text-xs text-slate-500 mb-2">
+                        Options <span className="text-blue-600">({field.type === 'multiselect' ? 'user can pick multiple' : 'user picks one'})</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {field.options.map((opt, oi) => (
+                          <div key={oi} className="flex items-center gap-2">
+                            <input value={opt} onChange={e => updateOption(field.id, oi, e.target.value)}
+                              className="flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                            <button onClick={() => removeOption(field.id, oi)} className="text-slate-300 hover:text-red-400">
+                              <X className="w-3.5 h-3.5"/>
+                            </button>
+                          </div>
+                        ))}
+                        <button onClick={() => addOption(field.id)}
+                          className="text-blue-600 text-xs hover:text-blue-700 flex items-center gap-1 mt-1">
+                          <Plus className="w-3 h-3"/> Add option
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Placeholder for text types */}
+                  {(field.type === 'text' || field.type === 'textarea') && (
+                    <div className="ml-7">
+                      <label className="text-xs text-slate-500 mb-1 block">Placeholder (optional)</label>
+                      <input value={field.placeholder} onChange={e => updateField(field.id, 'placeholder', e.target.value)}
+                        placeholder="Hint text shown inside the field"
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button onClick={addField}
+              className="mt-3 flex items-center gap-2 text-sm text-blue-600 hover:text-blue-700 border border-dashed border-blue-200 rounded-xl px-4 py-2.5 w-full justify-center hover:bg-blue-50 transition-colors">
+              <Plus className="w-4 h-4"/> Add Field
+            </button>
+          </div>
+        </div>
+
+        <div className="flex gap-3 p-6 border-t border-slate-100">
+          <button onClick={onClose} className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">
+            Cancel
+          </button>
+          <button onClick={save} disabled={saving}
+            className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl text-sm font-semibold transition-colors">
+            {saving ? 'Creating...' : 'Create Form'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Send Form Modal ──────────────────────────────────────────────────────────
+function SendModal({ templates, onClose, onSent }: {
+  templates: FormTemplate[]; onClose: () => void; onSent: () => void;
+}) {
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [templateId, setTemplateId] = useState(templates[0]?.id || '');
+  const [contactId, setContactId]   = useState('');
+  const [search, setSearch]         = useState('');
+  const [sending, setSending]       = useState(false);
+
+  useEffect(() => {
+    api.get('api/contacts').then(r => setContacts(r.data.data || [])).catch(() => {});
+  }, []);
+
+  const filtered = contacts.filter(c =>
+    c.name.toLowerCase().includes(search.toLowerCase()) ||
+    c.email.toLowerCase().includes(search.toLowerCase())
+  );
+
+  async function send() {
+    if (!templateId) { toast.error('Select a form'); return; }
+    if (!contactId)  { toast.error('Select a contact'); return; }
+    const contact = contacts.find(c => c.id === contactId);
+    if (!contact?.email) { toast.error('Selected contact has no email address'); return; }
     setSending(true);
     try {
-      await api.post('api/forms/submissions', {
-        formTemplateId: sendModal!.id,
-        contactId: sendContactId,
-        data: {},
-      });
-      setSendModal(null); setSendContactId('');
-      await loadAll();
-    } catch { alert('Failed to send form'); }
-    finally { setSending(false); }
+      await api.post('api/forms/submissions', { formTemplateId: templateId, contactId });
+      toast.success(`Form sent to ${contact.name} (${contact.email})`);
+      onSent();
+      onClose();
+    } catch (e: any) {
+      toast.error(e.response?.data?.error || 'Failed to send form');
+    } finally { setSending(false); }
   }
-
-  // ─── COMPLETE SUBMISSION ──────────────────────────────────────────────────
-  async function markComplete(id: string) {
-    setCompleting(true);
-    try {
-      await api.put(`api/forms/submissions/${id}/complete`, { data: {} });
-      await loadAll();
-      setViewModal(null);
-    } catch { alert('Failed to mark complete'); }
-    finally { setCompleting(false); }
-  }
-
-  // ─── STATS ────────────────────────────────────────────────────────────────
-  const pending = submissions.filter(s => s.status === 'PENDING').length;
-  const overdue = submissions.filter(s => s.status === 'PENDING' &&
-    new Date(s.createdAt) < new Date(Date.now() - 72 * 60 * 60 * 1000)).length;
-  const completed = submissions.filter(s => s.status === 'COMPLETED').length;
-
-  const filteredSubs = statusFilter === 'ALL' ? submissions
-    : submissions.filter(s => s.status === statusFilter);
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-5">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <h2 className="font-bold text-slate-900">Send Form</h2>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100"><X className="w-4 h-4"/></button>
+        </div>
 
-      {/* ── HEADER ── */}
+        <div className="p-6 space-y-5">
+          {/* Select template */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Form Template</label>
+            {templates.length === 0 ? (
+              <p className="text-sm text-slate-400 bg-slate-50 rounded-xl px-4 py-3">
+                No forms yet — create one first
+              </p>
+            ) : (
+              <select value={templateId} onChange={e => setTemplateId(e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                {templates.map(t => <option key={t.id} value={t.id}>{t.name} ({t.type})</option>)}
+              </select>
+            )}
+          </div>
+
+          {/* Select contact */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Send To</label>
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Search contacts..."
+              className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"/>
+            <div className="max-h-48 overflow-y-auto border border-slate-100 rounded-xl divide-y divide-slate-50">
+              {filtered.length === 0 ? (
+                <p className="text-sm text-slate-400 p-4 text-center">No contacts found</p>
+              ) : filtered.map(c => (
+                <label key={c.id} className={cn(
+                  'flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-50 transition-colors',
+                  contactId === c.id && 'bg-blue-50'
+                )}>
+                  <input type="radio" name="contact" value={c.id} checked={contactId === c.id}
+                    onChange={() => setContactId(c.id)} className="w-4 h-4 text-blue-600"/>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-slate-800 truncate">{c.name}</div>
+                    <div className={cn('text-xs truncate', c.email ? 'text-slate-400' : 'text-red-400')}>
+                      {c.email || 'No email — cannot send'}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {contactId && (() => {
+            const c = contacts.find(x => x.id === contactId);
+            return c?.email ? (
+              <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-sm text-blue-700">
+                📧 Will be sent to <strong>{c.email}</strong>
+              </div>
+            ) : null;
+          })()}
+        </div>
+
+        <div className="flex gap-3 p-6 border-t border-slate-100">
+          <button onClick={onClose} className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">
+            Cancel
+          </button>
+          <button onClick={send} disabled={sending || !templateId || !contactId}
+            className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors">
+            <Send className="w-3.5 h-3.5"/>
+            {sending ? 'Sending...' : 'Send Form'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Results Modal ────────────────────────────────────────────────────────────
+function ResultsModal({ sub, onClose }: { sub: Submission; onClose: () => void }) {
+  const fields: FormField[] = sub.formTemplate.fields || [];
+  const data = sub.data || {};
+
+  function renderAnswer(field: FormField) {
+    const val = data[field.id];
+    if (val === undefined || val === null || val === '') {
+      return <span className="text-slate-400 italic text-sm">No answer</span>;
+    }
+    if (Array.isArray(val)) {
+      return (
+        <div className="flex flex-wrap gap-1.5">
+          {val.map((v: string) => (
+            <span key={v} className="bg-blue-100 text-blue-700 text-xs px-2.5 py-1 rounded-full font-medium">{v}</span>
+          ))}
+        </div>
+      );
+    }
+    if (typeof val === 'boolean') {
+      return <span className={cn('text-sm font-medium', val ? 'text-emerald-600' : 'text-slate-500')}>
+        {val ? '✓ Yes' : '✗ No'}
+      </span>;
+    }
+    return <p className="text-sm text-slate-800 whitespace-pre-wrap">{String(val)}</p>;
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <div>
+            <h2 className="font-bold text-slate-900">{sub.formTemplate.name}</h2>
+            <p className="text-sm text-slate-400 mt-0.5">{sub.contact.name} · {sub.contact.email}</p>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100"><X className="w-4 h-4"/></button>
+        </div>
+
+        {/* Status banner */}
+        <div className={cn('px-6 py-3 border-b flex items-center gap-2 text-sm font-medium',
+          sub.status === 'COMPLETED' ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-amber-50 border-amber-100 text-amber-700')}>
+          {sub.status === 'COMPLETED'
+            ? <><CheckCircle2 className="w-4 h-4"/> Completed {sub.completedAt ? format(new Date(sub.completedAt), 'MMM d, yyyy h:mm a') : ''}</>
+            : <><Clock className="w-4 h-4"/> Pending — not yet submitted</>
+          }
+        </div>
+
+        <div className="p-6 overflow-y-auto flex-1">
+          {sub.status !== 'COMPLETED' ? (
+            <div className="text-center py-10">
+              <Clock className="w-10 h-10 text-slate-200 mx-auto mb-3"/>
+              <p className="text-slate-500 font-medium">Waiting for response</p>
+              <p className="text-slate-400 text-sm mt-1">The form was sent but the contact hasn't submitted it yet.</p>
+            </div>
+          ) : fields.length === 0 ? (
+            <div className="text-center py-10">
+              <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3"/>
+              <p className="text-slate-400 text-sm">No fields in this form template</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {fields.map(field => (
+                <div key={field.id} className="border-b border-slate-100 pb-5 last:border-0 last:pb-0">
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                    {field.label}
+                    {field.required && <span className="text-red-400 ml-1">*</span>}
+                    <span className="ml-2 normal-case font-normal text-slate-300">
+                      {FIELD_TYPES.find(t => t.value === field.type)?.label}
+                    </span>
+                  </p>
+                  {renderAnswer(field)}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="p-6 border-t border-slate-100">
+          <button onClick={onClose} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+export default function FormsPage() {
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [templates, setTemplates]     = useState<FormTemplate[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [filter, setFilter]           = useState<'ALL' | 'PENDING' | 'COMPLETED'>('ALL');
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [showSend, setShowSend]       = useState(false);
+  const [viewResult, setViewResult]   = useState<Submission | null>(null);
+
+  async function load() {
+    try {
+      const [subRes, tplRes] = await Promise.all([
+        api.get('api/forms/submissions'),
+        api.get('api/forms/templates'),
+      ]);
+      setSubmissions(subRes.data.data || []);
+      setTemplates(tplRes.data.data || []);
+    } catch (err) { toast.error('Failed to load forms'); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  const pending   = submissions.filter(s => s.status === 'PENDING');
+  const completed = submissions.filter(s => s.status === 'COMPLETED');
+  const overdue   = pending.filter(s =>
+    new Date(s.createdAt).getTime() < Date.now() - 3 * 24 * 60 * 60 * 1000
+  );
+  const filtered = filter === 'ALL' ? submissions : submissions.filter(s => s.status === filter);
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold font-display text-slate-900">Forms</h1>
-          <p className="text-sm text-slate-400 mt-0.5">Build intake forms · Send to contacts · Track completions</p>
+          <h1 className="page-title">Forms</h1>
+          <p className="page-subtitle">{templates.length} template{templates.length !== 1 ? 's' : ''} · track intake completion</p>
         </div>
-        <button onClick={() => setTab('builder')}
-          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-500 transition-colors shadow-sm">
-          <Plus className="w-4 h-4" /> Build New Form
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => setShowBuilder(true)}
+            className="flex items-center gap-2 px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors">
+            <Plus className="w-4 h-4"/> New Form
+          </button>
+          <button onClick={() => setShowSend(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 rounded-xl text-sm font-semibold text-white transition-colors shadow-sm shadow-blue-100">
+            <Send className="w-4 h-4"/> Send Form
+          </button>
+        </div>
       </div>
 
-      {/* ── STATS ── */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Stats */}
+      <div className="grid sm:grid-cols-3 gap-4">
         {[
-          { label: 'Awaiting Completion', value: pending, icon: Clock, color: 'amber' },
-          { label: 'Overdue (3+ days)', value: overdue, icon: AlertTriangle, color: 'red' },
-          { label: 'Completed', value: completed, icon: CheckCircle, color: 'emerald' },
-        ].map(s => {
-          const Icon = s.icon;
-          const c: Record<string, string> = {
-            amber: 'bg-amber-50 text-amber-600', red: 'bg-red-50 text-red-500', emerald: 'bg-emerald-50 text-emerald-600'
-          };
+          { label: 'Pending',   value: pending.length,   icon: Clock,         color: 'bg-amber-50 text-amber-600' },
+          { label: 'Overdue',   value: overdue.length,   icon: AlertTriangle, color: 'bg-red-50 text-red-600' },
+          { label: 'Completed', value: completed.length, icon: CheckCircle2,  color: 'bg-emerald-50 text-emerald-600' },
+        ].map(c => {
+          const Icon = c.icon;
           return (
-            <div key={s.label} className="bg-white rounded-2xl border border-slate-100 p-4 flex items-center gap-3">
-              <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0', c[s.color].split(' ')[0])}>
-                <Icon className={cn('w-5 h-5', c[s.color].split(' ')[1])} />
+            <div key={c.label} className="stat-card flex items-center gap-4">
+              <div className={cn('w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0', c.color)}>
+                <Icon className="w-6 h-6"/>
               </div>
               <div>
-                <div className={cn('text-2xl font-bold font-display', c[s.color].split(' ')[1])}>{s.value}</div>
-                <div className="text-xs text-slate-500 leading-tight">{s.label}</div>
+                <div className="text-3xl font-bold font-display text-slate-900">{c.value}</div>
+                <div className="text-sm text-slate-500">{c.label}</div>
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* ── TABS ── */}
-      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
-        {(['submissions', 'templates', 'builder'] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)}
-            className={cn('px-5 py-2 text-sm font-medium rounded-lg capitalize transition-all',
-              tab === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')}>
-            {t === 'builder' ? '+ Builder' : t}
+      {/* Filters */}
+      <div className="flex gap-2">
+        {(['ALL', 'PENDING', 'COMPLETED'] as const).map(f => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={cn('px-4 py-2 text-sm font-medium rounded-xl transition-colors',
+              filter === f ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50')}>
+            {f}
           </button>
         ))}
       </div>
 
-      {/* ══ SUBMISSIONS TAB ══════════════════════════════════════════════ */}
-      {tab === 'submissions' && (
+      {/* Table */}
+      {loading ? (
+        <div className="space-y-3">{Array(4).fill(0).map((_, i) => <div key={i} className="skeleton h-16 rounded-xl"/>)}</div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-100 p-16 text-center">
+          <FileText className="w-12 h-12 text-slate-200 mx-auto mb-3"/>
+          <p className="text-slate-500 font-medium mb-1">No form submissions</p>
+          <p className="text-slate-400 text-sm">Click "Send Form" to send a form to a contact</p>
+        </div>
+      ) : (
         <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-            <span className="text-sm font-medium text-slate-700">Form Submissions</span>
-            <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
-              {['ALL', 'PENDING', 'COMPLETED'].map(f => (
-                <button key={f} onClick={() => setStatusFilter(f)}
-                  className={cn('px-3 py-1 text-xs font-medium rounded-md transition-all',
-                    statusFilter === f ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500')}>
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {loading ? (
-            <div className="p-8 text-center text-slate-400">Loading...</div>
-          ) : filteredSubs.length === 0 ? (
-            <div className="py-14 text-center">
-              <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-              <p className="font-medium text-slate-500">No submissions yet</p>
-              <p className="text-sm text-slate-400 mt-1">
-                {statusFilter === 'ALL'
-                  ? 'Create a form template then send it to a contact'
-                  : `No ${statusFilter.toLowerCase()} submissions`}
-              </p>
-              {statusFilter === 'ALL' && (
-                <button onClick={() => setTab('builder')}
-                  className="mt-4 text-sm text-blue-600 font-medium hover:underline">
-                  Build your first form →
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px]">
-                <thead className="bg-slate-50 border-b border-slate-100">
-                  <tr>
-                    {['Contact', 'Form', 'Submitted', 'Status', ''].map(h => (
-                      <th key={h} className="text-left text-xs font-semibold text-slate-500 px-4 py-3 uppercase tracking-wide">{h}</th>
-                    ))}
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-slate-100">
+                {['Contact', 'Form', 'Sent', 'Status', 'Actions'].map(h => (
+                  <th key={h} className="text-left px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {filtered.map(s => {
+                const isOverdue = s.status === 'PENDING' &&
+                  new Date(s.createdAt).getTime() < Date.now() - 3 * 24 * 60 * 60 * 1000;
+                return (
+                  <tr key={s.id} className={cn('hover:bg-slate-50 transition-colors', isOverdue && 'bg-red-50/30')}>
+                    <td className="px-6 py-4">
+                      <div className="font-medium text-sm text-slate-800">{s.contact.name}</div>
+                      <div className="text-xs text-slate-400">{s.contact.email}</div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-sm text-slate-700 font-medium">{s.formTemplate.name}</div>
+                      <div className="text-xs text-slate-400 capitalize">{s.formTemplate.type?.toLowerCase()}</div>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-slate-500">
+                      {format(new Date(s.createdAt), 'MMM d, yyyy')}
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium border',
+                        s.status === 'COMPLETED' ? 'badge-green'
+                        : isOverdue ? 'badge-red' : 'badge-yellow')}>
+                        {s.status === 'COMPLETED' ? '✓ Completed' : isOverdue ? '⚠ Overdue' : '⏳ Pending'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <button
+                        onClick={() => setViewResult(s)}
+                        className="flex items-center gap-1.5 text-blue-600 hover:text-blue-700 text-xs font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
+                        <Eye className="w-3.5 h-3.5"/>
+                        {s.status === 'COMPLETED' ? 'View Results' : 'View'}
+                      </button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {filteredSubs.map(sub => {
-                    const isOverdue = sub.status === 'PENDING' &&
-                      new Date(sub.createdAt) < new Date(Date.now() - 72 * 60 * 60 * 1000);
-                    return (
-                      <tr key={sub.id} className={cn('hover:bg-slate-50/80 transition-colors', isOverdue && 'bg-red-50/30')}>
-                        <td className="px-4 py-3.5">
-                          <p className="text-sm font-medium text-slate-800">{sub.contact?.name}</p>
-                          <p className="text-xs text-slate-400">{sub.contact?.email || '—'}</p>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <p className="text-sm text-slate-700">{sub.formTemplate?.name}</p>
-                          <p className="text-xs text-slate-400">{sub.formTemplate?.type}</p>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <p className="text-sm text-slate-600">{new Date(sub.createdAt).toLocaleDateString()}</p>
-                          {isOverdue && <span className="text-xs font-semibold text-red-500">Overdue</span>}
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <span className={cn('inline-flex px-2.5 py-1 rounded-full text-xs font-semibold border',
-                            sub.status === 'COMPLETED'
-                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                              : isOverdue
-                                ? 'bg-red-50 text-red-700 border-red-200'
-                                : 'bg-amber-50 text-amber-700 border-amber-200')}>
-                            {sub.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <button onClick={() => setViewModal(sub)}
-                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium">
-                            <Eye className="w-3 h-3" /> View
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {/* ══ TEMPLATES TAB ════════════════════════════════════════════════ */}
-      {tab === 'templates' && (
-        <div className="grid md:grid-cols-2 gap-4">
-          {loading ? (
-            [1, 2].map(i => <div key={i} className="h-48 bg-white rounded-2xl border border-slate-100 animate-pulse" />)
-          ) : templates.length === 0 ? (
-            <div className="md:col-span-2 bg-white rounded-2xl border border-slate-100 py-14 text-center">
-              <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-              <p className="font-medium text-slate-500">No form templates yet</p>
-              <button onClick={() => setTab('builder')} className="mt-3 text-sm text-blue-600 font-medium hover:underline">
-                Build your first form →
-              </button>
-            </div>
-          ) : templates.map(t => (
-            <div key={t.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-              <div className="flex items-start justify-between mb-3">
-                <div>
-                  <h3 className="font-semibold text-slate-900">{t.name}</h3>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-xs font-medium rounded-full">{t.type}</span>
-                    <span className="text-xs text-slate-400">{t.fields?.length || 0} fields</span>
-                  </div>
-                </div>
-                <button onClick={() => { setSendModal(t); setSendContactId(''); }}
-                  className="flex items-center gap-1.5 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-blue-500 transition-colors">
-                  <Send className="w-3 h-3" /> Send
-                </button>
-              </div>
-              <div className="space-y-1.5 mt-3">
-                {(t.fields || []).slice(0, 5).map(f => (
-                  <div key={f.id} className="flex items-center gap-2 text-xs text-slate-500">
-                    <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
-                    <span>{f.label}</span>
-                    {f.required && <span className="text-red-400 font-medium">*</span>}
-                    <span className="ml-auto text-slate-300">{f.type}</span>
-                  </div>
-                ))}
-                {(t.fields?.length || 0) > 5 && (
-                  <p className="text-xs text-slate-400 pl-3.5">+{t.fields.length - 5} more fields</p>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
+      {/* Modals */}
+      {showBuilder && (
+        <BuilderModal
+          onClose={() => setShowBuilder(false)}
+          onSave={t => setTemplates(prev => [t, ...prev])}
+        />
       )}
-
-      {/* ══ BUILDER TAB ══════════════════════════════════════════════════ */}
-      {tab === 'builder' && (
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-5">
-          <div>
-            <h2 className="font-semibold font-display text-xl text-slate-900 mb-1">Form Builder</h2>
-            <p className="text-sm text-slate-400">Drag fields to reorder. Add options for dropdown fields.</p>
-          </div>
-
-          {/* Form meta */}
-          <div className="grid sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">Form Name *</label>
-              <input value={name} onChange={e => setName(e.target.value)}
-                placeholder="e.g. New Patient Intake Form"
-                className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">Form Type</label>
-              <select value={formType} onChange={e => setFormType(e.target.value)}
-                className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="INTAKE">Intake Form</option>
-                <option value="CONTACT">Contact Form</option>
-                <option value="AGREEMENT">Agreement / Waiver</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Fields */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-slate-700">Fields ({fields.length})</label>
-              <p className="text-xs text-slate-400">Fields marked * are required</p>
-            </div>
-
-            {fields.map((field, idx) => (
-              <div key={field.id} className="border border-slate-200 rounded-xl p-4 space-y-3 bg-slate-50/40">
-                <div className="flex items-center gap-2.5">
-                  {/* Move up/down */}
-                  <div className="flex flex-col gap-0.5 flex-shrink-0">
-                    <button onClick={() => moveField(field.id, 'up')} disabled={idx === 0}
-                      className="text-slate-300 hover:text-slate-500 disabled:opacity-0 transition-colors">
-                      <ChevronUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button onClick={() => moveField(field.id, 'down')} disabled={idx === fields.length - 1}
-                      className="text-slate-300 hover:text-slate-500 disabled:opacity-0 transition-colors">
-                      <ChevronDown className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  <input value={field.label} onChange={e => updateField(field.id, { label: e.target.value })}
-                    placeholder="Field label"
-                    className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
-
-                  <select value={field.type} onChange={e => updateField(field.id, { type: e.target.value as FieldType })}
-                    className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {FIELD_TYPES.map(ft => <option key={ft.value} value={ft.value}>{ft.label}</option>)}
-                  </select>
-
-                  <label className="flex items-center gap-1.5 text-sm text-slate-600 cursor-pointer flex-shrink-0">
-                    <input type="checkbox" checked={field.required}
-                      onChange={e => updateField(field.id, { required: e.target.checked })}
-                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-                    Req.
-                  </label>
-
-                  <button onClick={() => removeField(field.id)} disabled={fields.length <= 1}
-                    className="text-slate-300 hover:text-red-400 disabled:opacity-20 transition-colors flex-shrink-0">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {field.type === 'select' && (
-                  <div className="pl-7">
-                    <label className="text-xs text-slate-500 mb-1 block">Options (one per line)</label>
-                    <textarea
-                      value={(field.options || []).join('\n')}
-                      onChange={e => updateField(field.id, { options: e.target.value.split('\n').filter(Boolean) })}
-                      placeholder={'Option A\nOption B\nOption C'}
-                      rows={3}
-                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
-
-            <button onClick={addField}
-              className="w-full border-2 border-dashed border-slate-200 rounded-xl py-3 text-sm text-slate-400 hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center justify-center gap-2">
-              <Plus className="w-4 h-4" /> Add Field
-            </button>
-          </div>
-
-          {/* Save */}
-          <div className="flex items-center justify-between pt-4 border-t border-slate-100">
-            <p className="text-sm text-slate-400">{fields.length} field{fields.length !== 1 ? 's' : ''} · {formType} type</p>
-            <div className="flex items-center gap-3">
-              {saved && (
-                <span className="flex items-center gap-1.5 text-sm text-emerald-600 font-medium">
-                  <CheckCircle className="w-4 h-4" /> Saved!
-                </span>
-              )}
-              <button onClick={saveForm} disabled={saving || !name.trim()}
-                className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-500 disabled:opacity-50 transition-colors shadow-sm">
-                <Save className="w-4 h-4" />
-                {saving ? 'Saving...' : 'Save Template'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {showSend && (
+        <SendModal
+          templates={templates}
+          onClose={() => setShowSend(false)}
+          onSent={load}
+        />
       )}
-
-      {/* ══ SEND FORM MODAL ══════════════════════════════════════════════ */}
-      {sendModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-            <div className="flex items-center justify-between mb-5">
-              <h3 className="font-semibold font-display text-lg text-slate-900">Send Form</h3>
-              <button onClick={() => setSendModal(null)} className="text-slate-400 hover:text-slate-600 p-1">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="bg-blue-50 rounded-xl p-3.5 mb-5">
-              <p className="text-sm font-semibold text-blue-900">{sendModal.name}</p>
-              <p className="text-xs text-blue-600 mt-0.5">{sendModal.fields?.length} fields · {sendModal.type}</p>
-            </div>
-
-            <div className="mb-5">
-              <label className="block text-sm font-medium text-slate-700 mb-2">Send to Contact *</label>
-              <select value={sendContactId} onChange={e => setSendContactId(e.target.value)}
-                className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="">Select a contact...</option>
-                {contacts.map(c => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}{c.email ? ` — ${c.email}` : ''} [{c.status}]
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="bg-amber-50 border border-amber-100 rounded-xl p-3.5 mb-5 text-xs text-amber-800">
-              <strong>How it works:</strong> This creates a pending form submission record for the contact. Track it in the Submissions tab. Mark complete once they've filled it out.
-            </div>
-
-            <div className="flex gap-3">
-              <button onClick={() => setSendModal(null)}
-                className="flex-1 border border-slate-200 text-slate-700 rounded-xl py-2.5 text-sm font-medium hover:bg-slate-50">
-                Cancel
-              </button>
-              <button onClick={sendForm} disabled={sending || !sendContactId}
-                className="flex-1 bg-blue-600 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50 transition-colors">
-                {sending ? 'Sending...' : 'Send Form'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ══ VIEW SUBMISSION MODAL ════════════════════════════════════════ */}
-      {viewModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-            <div className="flex items-center justify-between mb-5">
-              <h3 className="font-semibold font-display text-lg text-slate-900">Submission Details</h3>
-              <button onClick={() => setViewModal(null)} className="text-slate-400 hover:text-slate-600 p-1">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 bg-slate-50 rounded-xl p-4 mb-5">
-              {[
-                { label: 'Contact', value: viewModal.contact?.name },
-                { label: 'Email', value: viewModal.contact?.email || '—' },
-                { label: 'Form', value: viewModal.formTemplate?.name },
-                { label: 'Type', value: viewModal.formTemplate?.type },
-                { label: 'Submitted', value: new Date(viewModal.createdAt).toLocaleString() },
-                ...(viewModal.booking ? [{ label: 'Linked Booking', value: viewModal.booking.serviceType.name }] : []),
-              ].map(row => (
-                <div key={row.label} className="flex justify-between text-sm">
-                  <span className="text-slate-500">{row.label}</span>
-                  <span className="font-medium text-slate-800">{row.value}</span>
-                </div>
-              ))}
-              <div className="flex justify-between text-sm pt-1 border-t border-slate-200">
-                <span className="text-slate-500">Status</span>
-                <span className={cn('font-semibold',
-                  viewModal.status === 'COMPLETED' ? 'text-emerald-600' : 'text-amber-600')}>
-                  {viewModal.status}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button onClick={() => setViewModal(null)}
-                className="flex-1 border border-slate-200 text-slate-700 rounded-xl py-2.5 text-sm font-medium hover:bg-slate-50">
-                Close
-              </button>
-              {viewModal.status === 'PENDING' && (
-                <button onClick={() => markComplete(viewModal.id)} disabled={completing}
-                  className="flex-1 bg-emerald-600 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-emerald-500 disabled:opacity-50 flex items-center justify-center gap-2">
-                  <CheckCircle className="w-4 h-4" />
-                  {completing ? 'Saving...' : 'Mark Complete'}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+      {viewResult && (
+        <ResultsModal sub={viewResult} onClose={() => setViewResult(null)}/>
       )}
     </div>
   );
